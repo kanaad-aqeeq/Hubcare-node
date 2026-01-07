@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Real-Time Chat UI</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  /* Reset & base */
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #f0f2f5;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    min-height: 100vh;
+  }
+
+  /* Container */
+  .chat-container {
+    width: 100%;
+    max-width: 650px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Header */
+  .chat-header {
+    background: linear-gradient(90deg, #4A90E2, #357ABD);
+    color: #fff;
+    font-weight: 600;
+    font-size: 22px;
+    padding: 18px 24px;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+
+  /* Controls panel */
+  .chat-controls {
+    padding: 20px 24px;
+    background: #f9fafc;
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+  .chat-controls input {
+    flex: 1 1 180px;
+    padding: 12px 15px;
+    font-size: 14px;
+    border-radius: 6px;
+    border: 1.5px solid #ddd;
+    transition: border-color 0.3s;
+  }
+  .chat-controls input:focus {
+    outline: none;
+    border-color: #4A90E2;
+  }
+  .chat-controls button {
+    flex: 1 1 120px;
+    background-color: #4A90E2;
+    color: white;
+    font-weight: 600;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+    padding: 12px 0;
+    box-shadow: 0 4px 10px rgba(74, 144, 226, 0.3);
+  }
+  .chat-controls button:hover {
+    background-color: #2e62b7;
+  }
+
+  /* Messages container */
+  #messages {
+    flex-grow: 1;
+    overflow-y: auto;
+    background: #fafafa;
+    padding: 20px 24px;
+    border-top: 1px solid #eee;
+    border-bottom: 1px solid #eee;
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* Custom scrollbar */
+  #messages::-webkit-scrollbar {
+    width: 8px;
+  }
+  #messages::-webkit-scrollbar-track {
+    background: #f0f2f5;
+  }
+  #messages::-webkit-scrollbar-thumb {
+    background-color: #4A90E2;
+    border-radius: 20px;
+  }
+
+  /* Message bubbles */
+  .msg {
+    max-width: 75%;
+    padding: 12px 18px;
+    border-radius: 20px;
+    position: relative;
+    font-size: 15px;
+    line-height: 1.4;
+    word-wrap: break-word;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+  }
+
+  /* Self (sent) message */
+  .self {
+    background-color: #DCF8C6;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+  }
+
+  /* Other (received) message */
+  .other {
+    background-color: #e2e2e2;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+  }
+
+  /* Message meta (sender name & time) */
+  .msg-meta {
+    font-size: 11px;
+    color: #666;
+    margin-top: 6px;
+    opacity: 0.7;
+  }
+
+  /* Input area */
+  .chat-input {
+    display: flex;
+    padding: 16px 24px;
+    background: #fff;
+    border-top: 1px solid #eee;
+  }
+  .chat-input input {
+    flex-grow: 1;
+    padding: 14px 20px;
+    border: 1.5px solid #ddd;
+    border-radius: 30px;
+    font-size: 16px;
+    transition: border-color 0.3s;
+  }
+  .chat-input input:focus {
+    outline: none;
+    border-color: #4A90E2;
+  }
+  .chat-input button {
+    background: #4A90E2;
+    color: white;
+    border: none;
+    padding: 0 25px;
+    margin-left: 15px;
+    border-radius: 30px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.3s;
+    box-shadow: 0 4px 10px rgba(74, 144, 226, 0.3);
+  }
+  .chat-input button:hover {
+    background: #2e62b7;
+  }
+
+  /* Loading */
+  .loading {
+    text-align: center;
+    color: #999;
+    font-style: italic;
+  }
+
+  @media (max-width: 480px) {
+    .chat-controls {
+      flex-direction: column;
+    }
+    .chat-controls input, .chat-controls button {
+      flex: 1 1 100%;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="chat-container" role="main" aria-label="Real-Time Chat Application">
+  <header class="chat-header">Real-Time Chat</header>
+
+  <section class="chat-controls" aria-label="Chat connection controls">
+    <input type="text" id="userId" placeholder="User ID" aria-label="User ID">
+    <input type="text" id="bookingId" placeholder="Booking ID" aria-label="Booking ID">
+    <input type="text" id="token" placeholder="JWT Token" aria-label="JWT Token">
+    <button type="button" onclick="connectSocket()">Connect</button>
+    <button type="button" onclick="loadMessages()">Load Messages</button>
+  </section>
+
+  <section id="messages" aria-live="polite" aria-relevant="additions" aria-atomic="false"></section>
+
+  <section class="chat-input" aria-label="Message input">
+    <input type="text" id="messageInput" placeholder="Type a message..." aria-label="Type a message" onkeypress="if(event.key==='Enter') sendMessage()">
+    <button type="button" onclick="sendMessage()">Send</button>
+  </section>
+</div>
+
+<script>
+  const socket = io("http://192.168.1.15:3017"); // Update with your backend URL
+
+  let userId = "";
+  let bookingId = "";
+  let token = "";
+
+  socket.on("connect", () => {
+    console.log("Socket connected");
+  });
+
+  // Real-time new message listener
+  socket.on("newMessage", (msg) => {
+    console.log("New message received:", msg);
+    appendMessage(msg, String(msg.senderId) === String(userId));
+  });
+
+  function connectSocket() {
+    userId = document.getElementById("userId").value.trim();
+    bookingId = document.getElementById("bookingId").value.trim();
+    token = document.getElementById("token").value.trim();
+
+    if (!userId || !bookingId || !token) {
+      alert("Please enter all fields.");
+      return;
+    }
+
+    socket.emit("register", userId);
+    alert("Connected and listening for real-time messages...");
+  }
+
+  function sendMessage() {
+    const input = document.getElementById("messageInput");
+    const content = input.value.trim();
+
+    if (!content) return;
+
+    fetch(`http://192.168.1.15:3017/api/send/${bookingId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ content })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.status) {
+        appendMessage(data.data, true);
+        input.value = "";
+        input.focus();
+      } else {
+        alert("Send failed: " + data.message);
+      }
+    })
+    .catch(err => {
+      console.error("Send Error:", err);
+    });
+  }
+
+  function loadMessages() {
+    const messagesDiv = document.getElementById("messages");
+    messagesDiv.innerHTML = `<div class="loading">Loading messages...</div>`;
+
+    fetch(`http://192.168.1.15:3017/api/getmessages/${bookingId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.status) {
+        messagesDiv.innerHTML = "";
+        data.messages.forEach(msg => appendMessage(msg, String(msg.senderId) === String(userId)));
+      } else {
+        alert("Load failed: " + data.message);
+      }
+    })
+    .catch(err => {
+      console.error("Load Error:", err);
+    });
+  }
+
+  function appendMessage(msg, isSelf) {
+    const messagesDiv = document.getElementById("messages");
+    const msgDiv = document.createElement("div");
+    msgDiv.className = "msg " + (isSelf ? "self" : "other");
+
+    // Message text
+    const textNode = document.createElement("div");
+    textNode.textContent = msg.content;
+    msgDiv.appendChild(textNode);
+
+    // Meta info: sender + time
+    const metaDiv = document.createElement("div");
+    metaDiv.className = "msg-meta";
+
+    // Show senderId or "You"
+    metaDiv.textContent = (isSelf ? "You" : `User: ${msg.senderId}`) + " • " + formatTime(msg.createdAt || new Date());
+
+    msgDiv.appendChild(metaDiv);
+
+    messagesDiv.appendChild(msgDiv);
+
+    // Smooth scroll to bottom
+    messagesDiv.scrollTo({
+      top: messagesDiv.scrollHeight,
+      behavior: "smooth"
+    });
+  }
+
+  function formatTime(dateInput) {
+    const d = new Date(dateInput);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+</script>
+
+</body>
+</html>
