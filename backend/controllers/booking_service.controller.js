@@ -20,11 +20,19 @@ const {
 const { validationResult } = require("express-validator");
 const { Op } = require("sequelize");
 const { getConnectedUsers, getSocketInstance } = require("../utils/socket");
-const sendNotificationToUsers  = require("../utils/sendNotificationToUsers");
+const sendNotificationToUsers = require("../utils/sendNotificationToUsers");
 
 // Payment Process
-const processPayment = async (userId,serviceId, amount, method, providerId, transaction) => {
-  if (method !== "WALLET") return { success: false, message: "Invalid payment method" };
+const processPayment = async (
+  userId,
+  serviceId,
+  amount,
+  method,
+  providerId,
+  transaction
+) => {
+  if (method !== "WALLET")
+    return { success: false, message: "Invalid payment method" };
 
   const [userWallet, providerWallet] = await Promise.all([
     wallet.findOne({ where: { userId }, transaction }),
@@ -39,13 +47,16 @@ const processPayment = async (userId,serviceId, amount, method, providerId, tran
   userWallet.balance = parseFloat(userWallet.balance) - parseFloat(amount);
   await userWallet.save({ transaction });
 
-  await wallet_transaction.create({
-    userId,
-    serviceId,
-    amount,
-    type: "DEBIT",
-    description: "Service booking payment via wallet",
-  }, { transaction });
+  await wallet_transaction.create(
+    {
+      userId,
+      serviceId,
+      amount,
+      type: "DEBIT",
+      description: "Service booking payment via wallet",
+    },
+    { transaction }
+  );
 
   if (providerWallet) {
     const commissionRate = parseFloat(process.env.PROVIDER_COMMSSION || "0.8");
@@ -54,12 +65,15 @@ const processPayment = async (userId,serviceId, amount, method, providerId, tran
     providerWallet.balance = parseFloat(providerWallet.balance) + providerShare;
     await providerWallet.save({ transaction });
 
-    await wallet_transaction.create({
-      userId: providerId,
-      amount: providerShare,
-      type: "CREDIT",
-      description: "Service payment received",
-    }, { transaction });
+    await wallet_transaction.create(
+      {
+        userId: providerId,
+        amount: providerShare,
+        type: "CREDIT",
+        description: "Service payment received",
+      },
+      { transaction }
+    );
   }
 
   return { success: true };
@@ -93,13 +107,17 @@ const confirmCashPayment = async (req, res) => {
     const providerWallet = await wallet.findOne({
       where: { userId: providerId },
     });
-    const adminWallet = await wallet.findOne({ where: { role: "Admin" } });
+
+    const adminUser = await user.findOne({ where: { role: "Admin" } });
+    const adminWallet = await wallet.findOne({
+      where: { userId: adminUser.id },
+    });
 
     if (!providerWallet || !adminWallet) {
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    const totalAmount = booking.totalAmount;
+    const totalAmount = booking.finalAmount;
     const commission = totalAmount * process.env.ADMIN_COMMISSION;
     const netAmount = totalAmount - commission;
 
@@ -151,160 +169,220 @@ const confirmCashPayment = async (req, res) => {
   }
 };
 
-// Add Booking
 const addBooking = async (req, res) => {
-  const t = await db.sequelize.transaction(); // start transaction
   try {
+    // -----------------------------
+    //  VALIDATION (NO TRANSACTION)
+    // -----------------------------
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
 
     const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ status: false, message: "User is not authenticated." });
+    if (!userId) {
+      return res.status(401).json({
+        status: false,
+        message: "User is not authenticated",
+      });
+    }
 
     const { serviceId } = req.params;
+    if (!serviceId) {
+      return res.status(400).json({ message: "Service ID is required" });
+    }
+
     const {
-      serviceDate, numberOfWorker, startTime, workHours,
-      locationId, offerId, paymentMethod, notificationId,
+      serviceDate,
+      numberOfWorker,
+      startTime,
+      workHours,
+      locationId,
+      offerId,
+      paymentMethod,
+      notificationId,
     } = req.body;
 
-    if (!serviceId) return res.status(400).json({ message: "Service ID is required" });
+    // -----------------------------
+    //  DATE & TIME VALIDATION
+    // -----------------------------
+    const parsedDate = moment(serviceDate, ["YYYY-MM-DD", "M/D/YYYY"], true);
+    const parsedTime = moment(startTime, ["HH:mm", "hh:mm A"], true);
 
-    // Format and validate date and time
-    const parsedDate = moment(serviceDate, ["M/D/YYYY", "YYYY-MM-DD"], true);
-    const parsedTime = moment(startTime, ["hh:mm A", "HH:mm"], true);
-    if (!parsedDate.isValid()) return res.status(400).json({ message: "Invalid service date format" });
-    if (!parsedTime.isValid()) return res.status(400).json({ message: "Invalid start time format" });
+    if (!parsedDate.isValid()) {
+      return res.status(400).json({ message: "Invalid service date format" });
+    }
+
+    if (!parsedTime.isValid()) {
+      return res.status(400).json({ message: "Invalid start time format" });
+    }
 
     const formattedDate = parsedDate.format("YYYY-MM-DD");
     const formattedStartTime = parsedTime.format("HH:mm:ss");
 
-    const [service, location] = await Promise.all([
-      subCategory_services.findOne({ where: { id: serviceId } }),
-      user_locations.findOne({ where: { id: locationId, userId } }),
-    ]);
+    // -----------------------------
+    //  READ QUERIES (NO TRANSACTION)
+    // -----------------------------
+    const service = await subCategory_services.findOne({
+      where: { id: serviceId },
+    });
 
-    if (!service) return res.status(404).json({ message: "Service not found" });
-    if (!location) return res.status(404).json({ message: "Location not found" });
+    if (!service) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const location = await user_locations.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      return res.status(404).json({ message: "Location not found" });
+    }
 
     const existingBooking = await booking_service.findOne({
       where: {
         userId,
         serviceId,
-        serviceDate: formattedDate,
-        bookingStatus: { [db.Sequelize.Op.notIn]: ["COMPLETED", "CANCELLED"] },
+        bookingStatus: { [Op.notIn]: ["COMPLETED", "CANCELLED"] },
       },
     });
 
     if (existingBooking) {
-      return res.status(400).json({ message: "You already have an active booking for this service." });
+      return res.status(400).json({
+        message: "You already have an active booking for this service",
+      });
     }
 
+    // -----------------------------
+    //  PRICE CALCULATION
+    // -----------------------------
     const baseAmount = service.servicePrice * numberOfWorker * workHours;
     let discountAmount = 0;
 
     if (offerId) {
-      const [offer, alreadyRedeemed] = await Promise.all([
-        promo_offer.findOne({ where: { id: offerId } }),
-        promo_redemption.findOne({ where: { userId, promoOfferId: offerId } }),
-      ]);
+      const offer = await promo_offer.findOne({ where: { id: offerId } });
+      const redeemed = await promo_redemption.findOne({
+        where: { userId, promoOfferId: offerId },
+      });
 
-      if (alreadyRedeemed) return res.status(400).json({ message: "You have already used this promo code." });
+      if (redeemed) {
+        return res.status(400).json({
+          message: "You have already used this promo code",
+        });
+      }
 
       if (offer) {
-        discountAmount = offer.discountType === "PERCENTAGE"
-          ? baseAmount * (offer.discountValue / 100)
-          : offer.discountValue;
+        discountAmount =
+          offer.discountType === "PERCENTAGE"
+            ? (baseAmount * offer.discountValue) / 100
+            : offer.discountValue;
       }
     }
 
     const amountAfterDiscount = baseAmount - discountAmount;
     const taxRate = parseFloat(process.env.BOOKING_TAXES || "0");
     const taxesAndFees = amountAfterDiscount * taxRate;
-    const finalAmount = parseFloat((amountAfterDiscount + taxesAndFees).toFixed(2));
+    const finalAmount = Number((amountAfterDiscount + taxesAndFees).toFixed(2));
 
     let paymentStatus = "PENDING";
 
-    if (paymentMethod !== "CASH") {
-      const paymentResult = await processPayment(userId,serviceId, finalAmount, paymentMethod, service.providerId, t);
-      if (!paymentResult.success) {
-        await t.rollback();
-        return res.status(400).json({ message: paymentResult.message || "Payment failed" });
+    // -----------------------------
+    //  START TRANSACTION (ONLY NOW)
+    // -----------------------------
+    const t = await db.sequelize.transaction();
+
+    try {
+      // -----------------------------
+      //  PAYMENT (TRANSACTION SAFE)
+      // -----------------------------
+      if (paymentMethod !== "CASH") {
+        const paymentResult = await processPayment(
+          userId,
+          serviceId,
+          finalAmount,
+          paymentMethod,
+          service.providerId,
+          t
+        );
+
+        if (!paymentResult.success) {
+          await t.rollback();
+          return res.status(400).json({
+            message: paymentResult.message || "Payment failed",
+          });
+        }
+
+        paymentStatus = "COMPLETED";
       }
-      paymentStatus = "COMPLETED";
-    }
 
-    const booking = await booking_service.create({
-      userId,
-      providerId: service.providerId,
-      services: service.serviceName,
-      locationId,
-      serviceDate: formattedDate,
-      numberOfWorker,
-      amount: service.servicePrice,
-      startTime: formattedStartTime,
-      workHours,
-      offerId: offerId || null,
-      discountAmount,
-      taxesAndFees,
-      finalAmount,
-      paymentMethod,
-      paymentStatus,
-    }, { transaction: t });
-
-    if (offerId) {
-      await promo_redemption.create({
-        userId,
-        promoOfferId: offerId,
-        bookingId: booking.id,
-        discountAmount,
-      }, { transaction: t });
-    }
-
-    if (notificationId) {
-      await user_notification.update(
-        { converted: true },
-        { where: { id: notificationId, userId }, transaction: t }
+      // -----------------------------
+      //  CREATE BOOKING
+      // -----------------------------
+      const booking = await booking_service.create(
+        {
+          userId,
+          serviceId,
+          providerId: service.providerId,
+          services: service.serviceName,
+          locationId,
+          serviceDate: formattedDate,
+          numberOfWorker,
+          amount: service.servicePrice,
+          startTime: formattedStartTime,
+          workHours,
+          offerId: offerId || null,
+          discountAmount,
+          taxesAndFees,
+          finalAmount,
+          paymentMethod,
+          paymentStatus,
+        },
+        { transaction: t }
       );
+
+      // -----------------------------
+      //  PROMO REDEMPTION
+      // -----------------------------
+      if (offerId) {
+        await promo_redemption.create(
+          {
+            userId,
+            promoOfferId: offerId,
+            bookingId: booking.id,
+            discountAmount,
+          },
+          { transaction: t }
+        );
+      }
+
+      // -----------------------------
+      //  NOTIFICATION UPDATE
+      // -----------------------------
+      if (notificationId) {
+        await user_notification.update(
+          { converted: true },
+          { where: { id: notificationId, userId }, transaction: t }
+        );
+      }
+
+      await t.commit();
+
+      return res.status(201).json({
+        status: true,
+        message: "Booking created successfully",
+        data: booking,
+      });
+    } catch (err) {
+      await t.rollback();
+      throw err;
     }
-
-    await t.commit();
-
-    const [currentUser, adminUser, providerUser] = await Promise.all([
-      user.findOne({ where: { id: userId }, attributes: ["id", "name", "device_token"] }),
-      user.findOne({ where: { role: "Admin" }, attributes: ["id", "name", "device_token"] }),
-      user.findOne({ where: { id: service.providerId }, attributes: ["id", "name", "device_token"] }),
-    ]);
-
-    await sendNotificationToUsers([
-      {
-        user: currentUser,
-        title: "Booking Created!",
-        message: `Your Booking has been successfully created. Booking ID: ${booking.id}`,
-        type: "BOOKING",
-      },
-      {
-        user: adminUser,
-        title: "New Booking Received!",
-        message: `A new booking has been created by ${currentUser?.name || "a user"}.`,
-        type: "BOOKING",
-      },
-      {
-        user: providerUser,
-        title: "New Booking Received!",
-        message: `A new booking has been created by ${currentUser?.name || "a user"}.`,
-        type: "BOOKING",
-      },
-    ]);
-
-    return res.status(201).json({
-      status: true,
-      message: "Booking created successfully",
-      data: booking,
-    });
   } catch (error) {
-    await t.rollback();
     console.error("Error creating booking:", error);
-    return res.status(500).json({ status: false, message: "Internal server error", error: error.message });
+    return res.status(500).json({
+      status: false,
+      message: "Internal server error",
+      error: error.message,
+    });
   }
 };
 
@@ -406,7 +484,10 @@ const cancelBooking = async (req, res) => {
       const myWallet = await wallet.findOne({ where: { userId } });
 
       if (myWallet) {
-        myWallet.balance += booking.finalAmount;
+        const walletBalance = Number(myWallet.balance) || 0;
+        const refundAmount = Number(booking.finalAmount) || 0;
+
+        myWallet.balance = Number((walletBalance + refundAmount).toFixed(2));
         await myWallet.save();
 
         await wallet_transaction.create({
@@ -489,6 +570,7 @@ const getUserBookings = async (req, res) => {
           model: subCategory_services,
           as: "service",
           attributes: [
+            // "id",
             "serviceImages",
             "serviceName",
             "serviceDescription",
@@ -554,8 +636,8 @@ const getBookingDetailsById = async (req, res) => {
         "startTime",
         "createdAt",
         "workingStatus", // Working status
-        "startTimestamp", // Working start time 
-        "completedAt" // Working completion time
+        "startTimestamp", // Working start time
+        "completedAt", // Working completion time
       ],
       include: [
         {
@@ -573,7 +655,7 @@ const getBookingDetailsById = async (req, res) => {
             {
               model: user,
               as: "provider",
-              attributes: ["id", "name", "email","companyaddress"],
+              attributes: ["id", "name", "email", "companyaddress"],
             },
           ],
         },
@@ -604,20 +686,20 @@ const getBookingDetailsById = async (req, res) => {
     const providerId = bookingJSON.service?.provider?.id;
     let averageRating = 0;
     let totalReviews = 0;
-    
+
     if (providerId) {
       const providerReviews = await review_ratings.findAll({
         where: { providerId },
         attributes: ["rating"],
       });
-    
+
       totalReviews = providerReviews.length;
-    
+
       if (totalReviews > 0) {
         const sum = providerReviews.reduce((acc, cur) => acc + cur.rating, 0);
         averageRating = parseFloat((sum / totalReviews).toFixed(2));
       }
-    
+
       bookingJSON.service.provider.averageRating = averageRating;
       bookingJSON.service.provider.totalReviews = totalReviews;
     }
@@ -627,7 +709,6 @@ const getBookingDetailsById = async (req, res) => {
       message: "Booking details fetched successfully.",
       // data: booking,
       data: bookingJSON,
-
     });
   } catch (error) {
     console.error("Error fetching booking details:", error);
@@ -760,16 +841,19 @@ const getProviderBookings = async (req, res) => {
       }
 
       if (upperStatus === "REQUEST") {
-        // whereCondition.approved = false;
         whereCondition = {
+          providerId,
           approved: false,
           bookingStatus: "ACTIVE",
         };
+      } else if (upperStatus === "ACTIVE") {
+        whereCondition = {
+          providerId,
+          approved: true,
+          bookingStatus: "ACTIVE",
+        };
       } else {
-        whereCondition.bookingStatus = upperStatus;
-        if (upperStatus === "ACTIVE") {
-          whereCondition.approved = true;
-        }
+        whereCondition = { providerId, bookingStatus: upperStatus };
       }
     }
 
@@ -862,7 +946,7 @@ const getUserBookingDetailsById = async (req, res) => {
             {
               model: user,
               as: "provider",
-              attributes: ["id", "name", "email","companyaddress"],
+              attributes: ["id", "name", "email", "companyaddress"],
             },
           ],
         },
@@ -914,14 +998,12 @@ const approveBookingRequest1 = async (req, res) => {
     const { bookingId } = req.params;
     const providerId = req.user.id;
 
-    const booking = await db.booking_service.findByPk(bookingId , {
+    const booking = await db.booking_service.findByPk(bookingId, {
       include: [
         {
           model: db.subCategory_services,
           as: "service",
-          attributes: [
-            "serviceName",
-          ],
+          attributes: ["serviceName"],
         },
       ],
     });
@@ -965,7 +1047,7 @@ const approveBookingRequest1 = async (req, res) => {
         message: "Admin not found",
       });
     }
-    const ADMIN_ID = adminUser.id
+    const ADMIN_ID = adminUser.id;
 
     await db.message.create({
       senderId: ADMIN_ID,
@@ -1006,22 +1088,25 @@ const approveBookingRequest = async (req, res) => {
     const { bookingId } = req.params;
     const providerId = req.user.id;
 
+    //in users, providerid.categoryid must match with booking_service.serviceid and in booking_service the provider_id must be updated after provider once aproves the booking
     const booking = await db.booking_service.findByPk(bookingId, {
       include: [
         {
           model: db.subCategory_services,
           as: "service",
-          attributes: [
-            "serviceName",
-          ],
+          attributes: ["serviceName"],
         },
       ],
     });
 
     if (!booking) {
-      return res.status(404).json({ status: false, message: "Booking not found" });
+      return res
+        .status(404)
+        .json({ status: false, message: "Booking not found" });
     }
 
+    console.log("Current Provider ID:", providerId);
+    console.log("Booking's Provider ID:", booking.providerId);
     if (booking.providerId !== providerId) {
       return res.status(403).json({
         status: false,
@@ -1041,17 +1126,21 @@ const approveBookingRequest = async (req, res) => {
     const io = getSocketInstance();
     const connectedUsers = getConnectedUsers();
 
-    const userMessage = `Your booking for package ${booking.service?.serviceName || "Service"} has been approved.`;
+    const userMessage = `Your booking for package ${
+      booking.service?.serviceName || "Service"
+    } has been approved.`;
 
     const adminUser = await db.user.findOne({ where: { role: "Admin" } });
     if (!adminUser) {
-      return res.status(500).json({ status: false, message: "Admin not found" });
+      return res
+        .status(500)
+        .json({ status: false, message: "Admin not found" });
     }
 
     await db.message.create({
       senderId: adminUser.id,
-      receiverId: booking.userId,  // optional
-      bookingId: booking.id,       // MAIN identifier
+      receiverId: booking.userId, // optional
+      bookingId: booking.id, // MAIN identifier
       content: userMessage,
       messageType: "text",
     });
@@ -1086,7 +1175,7 @@ const assignWorkerToBooking = async (req, res) => {
     const { bookingId } = req.params;
     const { workerIds } = req.body;
 
-    console.log(req.body,workerIds)
+    console.log(req.body, workerIds);
     if (!workerIds || !Array.isArray(workerIds) || workerIds.length === 0) {
       return res.status(400).json({
         status: false,
@@ -1283,7 +1372,6 @@ const assignSingleWorker = async (req, res) => {
   }
 };
 
-
 ///** ADMIN ---- */
 const getBookingOverAllHistoryByUserId__Test = async (req, res) => {
   try {
@@ -1295,7 +1383,6 @@ const getBookingOverAllHistoryByUserId__Test = async (req, res) => {
         message: "User ID is required.",
       });
     }
-
 
     const booking = await booking_service.findAll({
       where: {
@@ -1333,8 +1420,8 @@ const getBookingOverAllHistoryByUserId__Test = async (req, res) => {
               model: user,
               as: "provider",
               attributes: [
-                // "id", 
-                "name", 
+                // "id",
+                "name",
                 // "email"
               ],
             },
@@ -1380,7 +1467,14 @@ const getBookingOverAllHistoryByUserId__Test = async (req, res) => {
 const getBookingOverAllHistoryByUserId = async (req, res) => {
   try {
     const userId = req.params.id;
-    let { page = 1, limit = 10, serviceName, bookingStatus, startDate, endDate } = req.query;
+    let {
+      page = 1,
+      limit = 10,
+      serviceName,
+      bookingStatus,
+      startDate,
+      endDate,
+    } = req.query;
 
     if (!userId) {
       return res.status(400).json({
@@ -1486,7 +1580,6 @@ const getBookingDetailsByUserId = async (req, res) => {
       });
     }
 
-
     const booking = await booking_service.findOne({
       where: {
         userId: userId,
@@ -1565,7 +1658,7 @@ const getBookingDetailsByUserId = async (req, res) => {
 
 const getProviderIdBookings = async (req, res) => {
   try {
-   const { providerId } = req.params;
+    const { providerId } = req.params;
 
     if (!providerId) {
       return res.status(400).json({
@@ -1580,43 +1673,40 @@ const getProviderIdBookings = async (req, res) => {
     const whereCondition = {
       providerId,
     };
-    
+
     const userWhere = {};
     const serviceWhere = {};
     if (searchText) {
       whereCondition[Op.or] = [
-        { '$user.name$': { [Op.iLike]: `%${searchText}%` } },
-        { '$service.serviceName$': { [Op.iLike]: `%${searchText}%` } }
+        { "$user.name$": { [Op.iLike]: `%${searchText}%` } },
+        { "$service.serviceName$": { [Op.iLike]: `%${searchText}%` } },
       ];
     }
 
-    const { rows: bookings, count: totalCount } = await booking_service.findAndCountAll({
-      where: whereCondition,
-      include: [
-        {
-          model: subCategory_services,
-          as: "service",
-          attributes: [
-            "serviceImages",
-            "serviceName",
-            "serviceDescription",
-            "servicePrice",
-          ],
-        },
-        {
-          model: user,
-          as: "user",
-          attributes: [
-            "id",
-            "name",
-            "email",
-          ],
-        },
-      ],
-      order: [["createdAt", "DESC"]],
-      limit: parseInt(limit),
-      offset: parseInt(offset),
-    });
+    const { rows: bookings, count: totalCount } =
+      await booking_service.findAndCountAll({
+        where: whereCondition,
+        include: [
+          {
+            model: subCategory_services,
+            as: "service",
+            attributes: [
+              "serviceImages",
+              "serviceName",
+              "serviceDescription",
+              "servicePrice",
+            ],
+          },
+          {
+            model: user,
+            as: "user",
+            attributes: ["id", "name", "email"],
+          },
+        ],
+        order: [["createdAt", "DESC"]],
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+      });
 
     const totalPages = Math.ceil(totalCount / limit);
 
@@ -1648,7 +1738,6 @@ const getBookingDetailById = async (req, res) => {
         message: "Booking ID is required.",
       });
     }
-
 
     const booking = await booking_service.findOne({
       where: {
@@ -1742,9 +1831,9 @@ module.exports = {
   assignSingleWorker, // Single Assign
   getUserBookingDetailsById,
 
-  // ADMIN --- 
+  // ADMIN ---
   getBookingOverAllHistoryByUserId, //user id base All Booking   //admin.routes.js
-  getBookingDetailById,//booking id base get Booking   //admin.routes.js
-  getBookingDetailsByUserId,  //user id base Booking   //admin.routes.js
-  getProviderIdBookings,  //provider id base Booking  //admin.routes.js
+  getBookingDetailById, //booking id base get Booking   //admin.routes.js
+  getBookingDetailsByUserId, //user id base Booking   //admin.routes.js
+  getProviderIdBookings, //provider id base Booking  //admin.routes.js
 };

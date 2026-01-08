@@ -176,7 +176,7 @@ const { user_locations } = db;
 const locationAdd = async (req, res) => {
   try {
     const { id } = req.user;
-    console.log("User ID:", id);
+    //console.log("User ID:", id);
 
     if (!id) {
       return res
@@ -184,19 +184,20 @@ const locationAdd = async (req, res) => {
         .json({ status: false, message: "User ID is required" });
     }
 
-    const { latitude, longitude } = req.body;
-    console.log("Received Data:", latitude, longitude);
+    const { latitude, longitude, address } = req.body;
+    console.log("Received Data:", latitude, longitude, address);
 
-    if (!latitude || !longitude) {
+    if (!latitude || !longitude || !address) {
       return res
         .status(400)
-        .json({ status: false, message: "Latitude and Longitude are required!" });
+        .json({ status: false, message: "Latitude, Longitude, and Address are required!" });
     }
 
     // Create a new location entry
     const newLocation = await user_locations.create({
       latitude,
       longitude,
+      address,
       userId: id,
     });
 

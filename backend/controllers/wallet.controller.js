@@ -9,6 +9,7 @@ const addToWallet = async (req, res) => {
   const t = await sequelize.transaction(); // Start transaction
   try {
     const userId = req.user.id;
+    //console.log("User ID:", userId);
     const { amount, description ,payment_method ,token} = req.body;
 
     if (!amount || amount <= 0) {

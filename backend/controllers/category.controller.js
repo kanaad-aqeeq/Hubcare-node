@@ -126,7 +126,7 @@ const getProvidersByCategoryId = async (req, res) => {
     });
 
     if (!providers.length) {
-      consooe.log("No providers found in this category");
+      console.log("No providers found in this category");
       return res.status(404).json({
         status: false,
         message: "No providers found for this category.",

@@ -347,7 +347,7 @@ const changePassword = async (req, res) => {
 const userUpdateProfile = async (req, res) => {
   try {
     const { id } = req.user; // Get the user ID from the request
-    console.log("User ID:", id);
+    //console.log("User ID:", id);
 
     if (!id) {
       return res.status(400).json({ message: "User ID is required" });
@@ -411,7 +411,7 @@ const getUserProfile = async (req, res) => {
         .json({ status: false, message: "User ID is required" });
     }
 
-    console.log("User ID:", id);
+    //console.log("User ID:", id);
 
     // Find the existing user profile
     const userProfile = await db.user.findOne({ where: { id } });
@@ -452,7 +452,7 @@ const getUserProfile = async (req, res) => {
 const providerUpdateProfile = async (req, res) => {
   try {
     const { id } = req.user; // Get logged-in user ID
-    console.log("User ID:", id);
+    //console.log("User ID:", id);
 
     if (!id) {
       return res.status(400).json({ message: "User ID is required" });
